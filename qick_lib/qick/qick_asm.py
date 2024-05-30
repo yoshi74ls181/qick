@@ -3,6 +3,8 @@ The interface for writing QICK programs.
 This contains tools for managing the board configuration and the base class for QICK programs.
 The assembly language for QICK programs is defined separately for the v1 and v2 tProcessors.
 """
+from __future__ import annotations
+
 import logging
 import numpy as np
 import json
@@ -1660,7 +1662,7 @@ class AcquireMixin:
 
         return avg_d
 
-    def _average_buf(self, d_reps: np.ndarray, reads_per_shot: list, length_norm: bool=True, remove_offset: bool=True) -> np.ndarray:
+    def _average_buf(self, d_reps: np.ndarray, reads_per_shot: list, length_norm: bool=True, remove_offset: bool=True) -> list[np.ndarray]:
         """
         calculate averaged data in a data acquire round. This function should be overwritten in the child qick program
         if the data is created in a different shape.
