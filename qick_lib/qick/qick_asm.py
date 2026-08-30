@@ -69,12 +69,16 @@ class QickConfig():
             label = "%d_%d on JHC%d, or QICK box DAC port %d" % (block, tile + 228, jhc_connector, box_port)
         elif self['board']=='RFSoC4x2':
             label = {'00': 'DAC_B', '20': 'DAC_A'}[dacname]
+        else:
+            # Any other board: let the converter config name the port if it
+            # can, rather than leaving label unbound and raising.
+            label = self['rf']['dacs'][dacname].get('label', dacname)
         return "DAC tile %d, blk %d is %s" % (tile, block, label)
 
     def _describe_adc(self, adcname):
         tile, block = [int(c) for c in adcname]
         # we don't print the coupling because it might be confusing, but we could?
-        coupling = self['rf']['adcs'][adcname]['coupling']
+        coupling = self['rf']['adcs'][adcname].get('coupling')
         if self['board']=='ZCU111':
             rfbtype = "DC" if tile > 1 else "AC"
             label = "ADC%d_T%d_CH%d, or RF board ADC %s port %d" % (tile + 224, tile, block//2, rfbtype, (tile%2)*2 + block//2)
@@ -87,6 +91,8 @@ class QickConfig():
                 label = "%d_%d on JHC%d" % (block, tile + 224, jhc_connector)
         elif self['board']=='RFSoC4x2':
             label = {'00': 'ADC_D', '02': 'ADC_C', '20': 'ADC_B', '22': 'ADC_A'}[adcname]
+        else:
+            label = self['rf']['adcs'][adcname].get('label', adcname)
         return "ADC tile %d, blk %d is %s" % (tile, block, label)
 
     def description(self):

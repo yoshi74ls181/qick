@@ -87,8 +87,13 @@ class AD9361RF:
             'f_fabric': fs,
         }
         self.cfg = {
-            'dacs': {'00': dict(chan, interpolation=1)},
-            'adcs': {'00': dict(chan, decimation=1)},
+            'dacs': {'00': dict(chan, interpolation=1, label='AD9361 TX1')},
+            'adcs': {'00': dict(chan, decimation=1, label='AD9361 RX1')},
+            # QickConfig.description() reports which clocks are related. On this
+            # board the transmit and receive chains are not merely related, they
+            # are the same clock: both are the AD9361's, divided down by
+            # util_ad9361_divclk. So there is exactly one group.
+            'clk_groups': [[('dac', 0), ('adc', 0)]],
         }
 
     def __getitem__(self, key):
