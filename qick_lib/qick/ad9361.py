@@ -28,8 +28,25 @@ the 32-bit DDS phase accumulator, so requested frequencies land where asked.
 
 import glob
 import os
+import subprocess
+import time
 
 from .qick import QickSoc
+
+# Programming the PL resets axi_ad9361 underneath the bound AD9361 driver stack.
+# Passing a device tree overlay makes the kernel tear those drivers down and
+# re-probe them against the freshly programmed core, which is the difference
+# between a working radio and a chip left asleep: without it the AD9361 goes to
+# sleep, its sample rate halves on every load, ensm_mode writes are silently
+# ignored, and further access eventually wedges the driver. Recovering then needs
+# a reboot -- unbinding and rebinding the SPI device is not enough and hangs on a
+# calibration timeout.
+#
+# This is the same overlay the board's own /boot/boot.py uses to bring up the
+# base design, and it describes the AD9361 peripherals, which the QICK overlay
+# keeps at their original addresses. The QICK IP themselves need no kernel
+# drivers -- PYNQ reaches them through /dev/mem.
+DEFAULT_DTBO = '/home/xilinx/jupyter_notebooks/base/pl.dtbo'
 
 # Data register offset in an AXI GPIO.
 _GPIO_DATA = 0x0
@@ -120,15 +137,31 @@ class QickSocE200(QickSoc):
         clocked at, and is what the base design's util_ad9361_divclk produces.
     """
 
-    def __init__(self, bitfile=None, fs=None, **kwargs):
+    def __init__(self, bitfile=None, fs=None, dtbo=DEFAULT_DTBO,
+                 restart_iiod=True, **kwargs):
         self._fs_arg = fs
         if kwargs.pop('no_rf', False) is not False:
             raise ValueError("QickSocE200 always runs with no_rf=True")
-        super().__init__(bitfile=bitfile, no_rf=True, **kwargs)
+        if dtbo is not None and not os.path.exists(dtbo):
+            raise FileNotFoundError(
+                "device tree overlay %s not found. It is required: without it "
+                "the AD9361 drivers are not re-probed after the PL is "
+                "reprogrammed and the radio is left asleep. Pass dtbo=None only "
+                "if the PL is already programmed and you are loading with "
+                "download=False." % (dtbo,))
+        self._restart_iiod = restart_iiod
+        super().__init__(bitfile=bitfile, no_rf=True, dtbo=dtbo, **kwargs)
 
     # -- hooks that QickSoc leaves for boards without an RF data converter ----
 
     def config_rf_alt(self):
+        # iiod holds its own handles on the IIO devices, which the dtbo re-probe
+        # has just replaced. Restarting it is what /boot/boot.py does after
+        # loading the base design, for the same reason.
+        if self._restart_iiod:
+            subprocess.run(['systemctl', 'restart', 'iiod'], check=False)
+            time.sleep(2.0)
+
         fs = self._fs_arg if self._fs_arg is not None else read_ad9361_fs()
         self.rf = AD9361RF(fs)
         self['rf'] = self.rf.cfg
@@ -155,6 +188,30 @@ class QickSocE200(QickSoc):
         AXI-Stream path to a converter for trace_forward/trace_back to follow.
         """
         return self.rf, '00'
+
+    def start_tproc(self):
+        """Enable the timing and processor cores, then start.
+
+        QickSoc.start_tproc() only issues PROCESSOR_START (tproc_ctrl bit 2).
+        On this build that is not enough: after a program is loaded the status
+        register reports Core_EN = 0 and Time_EN = 0, the timing counter
+        (time_usr) does not advance, and the shot counter never increments -- so
+        acquire() spins forever waiting for a shot that cannot happen. Nothing in
+        QICK's Python ever calls core_start(), so the cores must come up enabled
+        on the firmware their projects ship; they do not here.
+
+        Issuing TIME_UPDATE and CORE_START first fixes it, and is idempotent, so
+        this is safe to do on every round. Note start_src() calls stop() just
+        before start_tproc() is reached, which is why the enables have to be
+        re-asserted here rather than once at load time.
+
+        Verified on hardware: time_usr then advances at 6.16e6 ticks per 200 ms,
+        i.e. 30.8 MHz, matching the 30.72 MHz sample clock.
+        """
+        if self.TPROC_VERSION == 2 and self.tproc.get_start_src() == 'internal':
+            self.tproc.time_update()
+            self.tproc.core_start()
+        super().start_tproc()
 
     # -- board-specific control ----------------------------------------------
 
