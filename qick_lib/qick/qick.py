@@ -47,6 +47,19 @@ from .drivers.xcom import *
 logger = logging.getLogger(__name__)
 
 
+def _as_int32_words(data):
+    """Reinterpret 32-bit memory words as int32, independently of host word size.
+
+    Converting a Python int straight to np.int32 goes via C long, which is 32
+    bits on a 32-bit ARM (Zynq-7000), so any unsigned word >= 2**31 raises
+    OverflowError. It happens to work on aarch64 only because C long is 64 bits
+    there and the value then wraps silently. Going through int64 and masking to
+    the unsigned 32-bit bit pattern before reinterpreting is word-size
+    independent, and accepts unsigned words, negative signed values, and
+    already-typed int32 arrays alike.
+    """
+    return (np.array(data, dtype=np.int64) & 0xFFFFFFFF).astype(np.uint32).view(np.int32)
+
 class AxisSwitch(SocIP):
     """
     AxisSwitch class to control Xilinx AXI-Stream switch IP
@@ -1661,7 +1674,7 @@ class QickSoc(Overlay, QickConfig):
         elif self.TPROC_VERSION == 2:
             for mem_sel in ['pmem', 'dmem', 'wmem']:
                 if binprog[mem_sel] is not None:
-                    binprog[mem_sel] = np.array(binprog[mem_sel], dtype=np.int32)
+                    binprog[mem_sel] = _as_int32_words(binprog[mem_sel])
         self.tproc.load_bin_program(binprog, load_mem=load_mem)
 
     def reload_mem(self):
@@ -1686,7 +1699,7 @@ class QickSoc(Overlay, QickConfig):
         addr : int
             Starting write address
         """
-        data = np.array(data, dtype=np.int32)
+        data = _as_int32_words(data)
         if self.TPROC_VERSION == 1:
             if mem_sel=='dmem':
                 self.tproc.load_dmem(data, addr)
