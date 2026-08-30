@@ -4,8 +4,27 @@ The lower-level driver for the QICK library. Contains classes for interfacing wi
 import os
 import mmap
 from pynq.overlay import Overlay
-import xrfclk
-import xrfdc
+try:
+    import xrfclk
+    import xrfdc
+    _HAS_XRF = True
+except ImportError:
+    # xrfclk and xrfdc are RFSoC-only and are not packaged for Zynq-7000, so a
+    # board like the AntSDR E200 (AD9361 front end) will never have them.
+    # Everything that uses them is reached only for a design containing an RF
+    # data converter, i.e. never when running with no_rf=True.
+    xrfclk = None
+    xrfdc = None
+    _HAS_XRF = False
+
+if _HAS_XRF:
+    _RFdcBase = xrfdc.RFdc
+else:
+    # Placeholder so the RFDC class below can still be defined. It is only ever
+    # instantiated by PYNQ binding it to a usp_rf_data_converter, which cannot
+    # be present if xrfdc is missing.
+    class _RFdcBase:
+        pass
 import numpy as np
 import time
 import queue
@@ -92,7 +111,7 @@ class AxisSwitch(SocIP):
         # Enable register update.
         self.ctrl = 2
 
-class RFDC(SocIP, xrfdc.RFdc):
+class RFDC(SocIP, _RFdcBase):
     """
     Extends the xrfdc driver.
     Calling xrfdc functions is slow (typically ~8 ms per call).
