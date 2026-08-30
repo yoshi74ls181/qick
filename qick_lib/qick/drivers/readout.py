@@ -104,10 +104,8 @@ class AxisReadoutV2(SocIP, AbsReadout):
 
         self.soc = soc
 
-        # what RFDC port drives this readout?
-        block, port, _ = soc.metadata.trace_back(self['fullpath'], 's_axis', ["usp_rf_data_converter"])
-        # port names are of the form 'm02_axis' where the block number is always even
-        self.cfg['adc'] = port[1:3]
+        # which converter port drives this readout?
+        _, self.cfg['adc'] = soc.find_rf_port(self, 'adc', 's_axis')
 
     def update(self):
         """

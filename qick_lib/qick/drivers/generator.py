@@ -33,12 +33,8 @@ class AbsSignalGen(SocIP):
 
         self.soc = soc
 
-        # what RFDC port does this generator drive?
-        block, port, _ = soc.metadata.trace_forward(self['fullpath'], 'm_axis', ["usp_rf_data_converter"])
-
-        self.rf = soc._get_block(block)
-        # port names are of the form 's00_axis'
-        self.cfg['dac'] = port[1:3]
+        # which converter port does this generator drive?
+        self.rf, self.cfg['dac'] = soc.find_rf_port(self, 'dac', 'm_axis')
 
         daccfg = soc['rf']['dacs'][self['dac']]
         for p in ['fs', 'fs_mult', 'fs_div', 'interpolation', 'f_fabric']:
@@ -267,6 +263,13 @@ class AxisSignalGen(AbsArbSignalGen, AbsPulsedSignalGen):
 
         # Maximum number of samples
         self.cfg['maxlen'] = 2**env_n * n_dds
+
+        # Samples per fabric clock is N_DDS, not the class default: this IP is
+        # parameterised, and a build with N_DDS != 16 (e.g. one lane feeding an
+        # AD9361 at 1 sample/clock) would otherwise get envelope lengths,
+        # addresses and durations wrong by a factor of 16/N_DDS. Set before the
+        # super() call, which copies SAMPS_PER_CLK into cfg.
+        self.SAMPS_PER_CLK = n_dds
 
         self.REGISTERS = {'start_addr_reg': 0, 'we_reg': 1, 'rndq_reg': 2}
 

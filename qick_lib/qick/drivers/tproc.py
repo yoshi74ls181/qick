@@ -434,8 +434,8 @@ class Axis_QICK_Proc(SocIP):
         This is run as part of configure_connections(), but can be run separately to plan RFDC sampling rate changes.
         """
         self.cfg['clk_srcs'] = {}
-        self.cfg['clk_srcs']['core clock'] = soc.metadata.trace_clk_back(self['fullpath'], 'c_clk_i')
-        self.cfg['clk_srcs']['timing clock'] = soc.metadata.trace_clk_back(self['fullpath'], 't_clk_i')
+        self.cfg['clk_srcs']['core clock'] = soc.clk_src(self['fullpath'], 'c_clk_i')
+        self.cfg['clk_srcs']['timing clock'] = soc.clk_src(self['fullpath'], 't_clk_i')
     
     def configure_connections(self, soc):
         super().configure_connections(soc)

@@ -858,7 +858,11 @@ class QickSoc(Overlay, QickConfig):
         # Time-tagger blocks.
         self.time_taggers = []
 
-        if not no_rf:
+        if no_rf:
+            # Boards whose front end is not an RF data converter (e.g. an AD9361)
+            # set up self.rf, self['rf'] and self['refclk_freq'] here.
+            self.config_rf_alt()
+        else:
             # RF data converter (for configuring ADCs and DACs, and setting NCOs)
             self.rf = self.usp_rf_data_converter_0
             self['rf'] = self.rf.cfg
@@ -909,6 +913,46 @@ class QickSoc(Overlay, QickConfig):
         for x in fullpath.split('/'):
             block = getattr(block, x)
         return block
+
+    def config_rf_alt(self):
+        """Set up a front end that is not an RF data converter.
+
+        Called from __init__ when no_rf=True. The default does nothing, so
+        no_rf=True keeps meaning "no RF front end at all". A board with a
+        different converter (e.g. the AD9361 on an AntSDR E200) overrides this
+        to populate self.rf, self['rf'] and self['refclk_freq'].
+        """
+        pass
+
+    def clk_src(self, fullpath, port):
+        """Identify the source and frequency of a block's clock input.
+
+        Factored out so boards can override it. The default traces the clock
+        back through the block design, which requires it to originate at the PS
+        or the RF data converter; a board clocked from an external converter pin
+        has to answer this itself.
+        """
+        return self.metadata.trace_clk_back(fullpath, port)
+
+    def find_rf_port(self, block, kind, port):
+        """Identify which converter port a generator or readout is wired to.
+
+        Returns (rf_object, port_index_as_str).
+
+        The default follows the AXI-Stream path to the RF data converter. Boards
+        without one override this: there is no bus to trace, so the mapping has
+        to be stated rather than discovered.
+        """
+        if kind == 'dac':
+            blk, prt, _ = self.metadata.trace_forward(block['fullpath'], port, ["usp_rf_data_converter"])
+        else:
+            blk, prt, blocktype = self.metadata.trace_back(block['fullpath'], port, ["usp_rf_data_converter", "axis_combiner"])
+            # dual-ADC boards (ZCU111, RFSoC4x2) give two RFDC outputs per ADC,
+            # combined upstream - look at the first one
+            if blocktype == "axis_combiner":
+                ((blk, prt),) = self.metadata.trace_bus(blk, 'S00_AXIS')
+        # port names look like 's00_axis' / 'm02_axis'
+        return self._get_block(blk), prt[1:3]
 
     def map_signal_paths(self, no_tproc):
         """
