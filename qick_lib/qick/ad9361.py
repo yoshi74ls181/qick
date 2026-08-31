@@ -55,6 +55,31 @@ _GPIO_DATA = 0x0
 TX_SRC = {'dma': 0, 'qick': 1}
 
 
+def radio_is_awake():
+    """True if the AD9361 is in a state where it drives the LVDS DATA_CLK.
+
+    This is a safety check, not a convenience. The AD9361 sources the clock that
+    l_clk -- and therefore the divided clock the whole QICK datapath runs on --
+    is derived from. If the chip is asleep that clock is stopped, and an AXI
+    access into axi_ad9361 then has no clock to complete against. On a Zynq that
+    is not a failed read, it is a hung interconnect: the CPU blocks forever and
+    stops servicing interrupts, so even magic SysRq over the serial console gets
+    no response and only a power cycle recovers the board.
+
+    That is the most likely explanation for the hard hang seen during the first
+    bring-up: the transmit path had been corrupted, the AD9361 driver's digital
+    calibration failed, the chip was left asleep, and the next thing to touch its
+    registers took the machine down with it.
+    """
+    for devdir in glob.glob('/sys/bus/iio/devices/iio:device*'):
+        try:
+            if open(os.path.join(devdir, 'name')).read().strip() != 'ad9361-phy':
+                continue
+            return open(os.path.join(devdir, 'ensm_mode')).read().strip() in ('fdd', 'tdd', 'alert')
+        except OSError:
+            return False
+    return False
+
 def read_ad9361_fs():
     """Read the AD9361 sample rate, in MHz, from IIO sysfs.
 
@@ -78,6 +103,40 @@ def read_ad9361_fs():
         "could not read the AD9361 sample rate from IIO sysfs; "
         "pass fs=<MHz> to QickSocE200 instead")
 
+
+def quiesce_axi_masters(verbose=False):
+    """Idle the AXI masters in the PL before it is reprogrammed.
+
+    Reprogramming the PL while a master has a burst outstanding can lock the AXI
+    interconnect. The CPU then blocks forever on its next bus access -- hard
+    enough that magic SysRq over the serial console gets no response either, and
+    only a power cycle recovers. /boot/boot.py never hits this because at boot
+    nothing is running yet; by the time an overlay is loaded from a shell, the
+    ADI ADC and DAC DMAs and iiod are all live masters.
+
+    So: stop iiod, then disable any active IIO buffer, which is what makes the
+    ADI DMAs issue transactions in the first place.
+    """
+    subprocess.run(['systemctl', 'stop', 'iiod'], check=False)
+
+    stopped = []
+    for devdir in sorted(glob.glob('/sys/bus/iio/devices/iio:device*')):
+        enable = os.path.join(devdir, 'buffer', 'enable')
+        if not os.path.exists(enable):
+            continue
+        try:
+            if open(enable).read().strip() not in ('0', ''):
+                with open(enable, 'w') as f:
+                    f.write('0')
+                stopped.append(devdir)
+        except OSError:
+            # A wedged device can block here; nothing useful to do but move on.
+            pass
+    time.sleep(0.5)
+    if verbose:
+        print("quiesce: iiod stopped, buffers disabled on %s"
+              % (stopped if stopped else 'none'))
+    return stopped
 
 class AD9361RF:
     """Stands in for the RF data converter, describing an AD9361 chain.
@@ -150,6 +209,9 @@ class QickSocE200(QickSoc):
                 "if the PL is already programmed and you are loading with "
                 "download=False." % (dtbo,))
         self._restart_iiod = restart_iiod
+        # Must happen before Overlay.__init__ programs the PL.
+        if kwargs.get('download', True):
+            quiesce_axi_masters()
         super().__init__(bitfile=bitfile, no_rf=True, dtbo=dtbo, **kwargs)
 
     # -- hooks that QickSoc leaves for boards without an RF data converter ----
@@ -161,6 +223,20 @@ class QickSocE200(QickSoc):
         if self._restart_iiod:
             subprocess.run(['systemctl', 'restart', 'iiod'], check=False)
             time.sleep(2.0)
+
+        # Refuse to go further if the radio did not survive the PL load. Reading
+        # the sample rate below is itself an access into that clock domain, so
+        # this check has to come first -- and stopping here with an exception is
+        # very much better than the alternative, which is hanging the CPU hard
+        # enough to need a power cycle.
+        if not radio_is_awake():
+            raise RuntimeError(
+                "the AD9361 is not awake after programming the PL, so it is not "
+                "driving the LVDS DATA_CLK that the QICK datapath is clocked "
+                "from. Touching axi_ad9361 registers in this state can hang the "
+                "CPU hard enough to require a power cycle, so stopping here. "
+                "Check ensm_mode, and that a dtbo was passed so the AD9361 "
+                "drivers were re-probed against the freshly programmed PL.")
 
         fs = self._fs_arg if self._fs_arg is not None else read_ad9361_fs()
         self.rf = AD9361RF(fs)
