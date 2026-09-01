@@ -27,6 +27,7 @@ the 32-bit DDS phase accumulator, so requested frequencies land where asked.
 """
 
 import glob
+import logging
 import os
 import subprocess
 import time
@@ -47,6 +48,8 @@ from .qick import QickSoc
 # keeps at their original addresses. The QICK IP themselves need no kernel
 # drivers -- PYNQ reaches them through /dev/mem.
 DEFAULT_DTBO = '/home/xilinx/jupyter_notebooks/base/pl.dtbo'
+
+logger = logging.getLogger(__name__)
 
 # Data register offset in an AXI GPIO.
 _GPIO_DATA = 0x0
@@ -184,6 +187,10 @@ class AD9361RF:
 
 
 class QickSocE200(QickSoc):
+    # How many times to try bringing the tProc cores up before giving up. The
+    # control handshake swallows writes unpredictably; see start_tproc().
+    START_ATTEMPTS = 12
+
     """QickSoc for the AntSDR E200 overlay in antsdr-pynq/boards/e200/qick.
 
     Parameters
@@ -266,28 +273,60 @@ class QickSocE200(QickSoc):
         return self.rf, '00'
 
     def start_tproc(self):
-        """Enable the timing and processor cores, then start.
+        """Take the tProc out of reset, then start.
 
-        QickSoc.start_tproc() only issues PROCESSOR_START (tproc_ctrl bit 2).
-        On this build that is not enough: after a program is loaded the status
-        register reports Core_EN = 0 and Time_EN = 0, the timing counter
-        (time_usr) does not advance, and the shot counter never increments -- so
-        acquire() spins forever waiting for a shot that cannot happen. Nothing in
-        QICK's Python ever calls core_start(), so the cores must come up enabled
-        on the firmware their projects ship; they do not here.
+        QickSoc.start_tproc() issues only PROCESSOR_START. On this build that is
+        inert, because acquire() calls clear_tproc_counter() immediately before,
+        and on tProc v2 that means tproc.reset() -- PROCESSOR_RESET. After a
+        reset the only control command this firmware responds to is
+        PROCESSOR_RUN; time_reset, time_update, core_start and start all leave
+        the status register untouched. Measured directly:
 
-        Issuing TIME_UPDATE and CORE_START first fixes it, and is idempotent, so
-        this is safe to do on every round. Note start_src() calls stop() just
-        before start_tproc() is reached, which is why the enables have to be
-        re-asserted here rather than once at load time.
+            after reset  Core_EN=0 Time_EN=0 time_usr=0
+            + time_reset / time_update / core_start / start  -> no change
+            + run        Core_EN=1 Time_EN=1 time_usr advancing at 30.76 MHz
 
-        Verified on hardware: time_usr then advances at 6.16e6 ticks per 200 ms,
-        i.e. 30.8 MHz, matching the 30.72 MHz sample clock.
+        Without it the processor core can be coaxed into C_RUN while the timing
+        core stays disabled and time_usr sits frozen. The program then blocks on
+        its first timed instruction, never reaches inc_ext_counter, and acquire()
+        polls a shot counter that can never advance -- which presents as a hang
+        with no error anywhere.
+
+        run() is issued unconditionally because it is idempotent, and start_src()
+        calls stop() just before this point, so the state has to be re-established
+        on every round rather than once at load time.
+
+        The delay below is load-bearing, not defensive: the first control write
+        after a reset is swallowed, so run() alone leaves the core stopped and
+        run() immediately followed by start() is no better. Only two writes
+        separated in time bring both cores up.
         """
-        if self.TPROC_VERSION == 2 and self.tproc.get_start_src() == 'internal':
-            self.tproc.time_update()
-            self.tproc.core_start()
-        super().start_tproc()
+        if self.TPROC_VERSION != 2:
+            super().start_tproc()
+            return
+
+        # The control handshake is not reliable enough to issue blind. After a
+        # reset the first write is swallowed, and whether a given write takes
+        # appears to be timing dependent -- the same sequence that brings both
+        # cores up one run leaves Core_EN=0 the next. So issue and verify,
+        # rather than assume.
+        for attempt in range(self.START_ATTEMPTS):
+            self.tproc.run()
+            time.sleep(0.01)
+            super().start_tproc()
+            time.sleep(0.01)
+            status = self.tproc.tproc_status
+            core_en = (status >> 3) & 1
+            time_en = (status >> 7) & 1
+            if core_en and time_en:
+                if attempt:
+                    logger.info("tProc cores came up on attempt %d", attempt + 1)
+                return
+        raise RuntimeError(
+            "the tProc cores did not enable after %d attempts (status=0x%08x). "
+            "Core_EN and Time_EN must both be set or the program blocks on its "
+            "first timed instruction and the shot counter never advances."
+            % (self.START_ATTEMPTS, self.tproc.tproc_status))
 
     # -- board-specific control ----------------------------------------------
 
