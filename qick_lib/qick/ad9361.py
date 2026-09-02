@@ -185,6 +185,9 @@ class AD9361RF:
                 "place the signal instead (requested zone %s)" % (nqz,))
 
 
+_FS_DESCRIPTION = "AD9361 front end"
+
+
 class QickSocE200(QickSoc):
     # How many times to try bringing the tProc cores up before giving up. The
     # control handshake swallows writes unpredictably; see start_tproc().
@@ -248,8 +251,66 @@ class QickSocE200(QickSoc):
         self.rf = AD9361RF(fs)
         self['rf'] = self.rf.cfg
         self['refclk_freq'] = fs
+        # replace rather than append: refresh_rf() calls this a second time, and
+        # a stale line quoting the old rate next to the new one is worse than no
+        # line at all.
+        self['extra_description'] = [d for d in self['extra_description']
+                                     if not d.startswith(_FS_DESCRIPTION)]
         self['extra_description'].append(
-            "AD9361 front end, fs = %.6f MHz (no RF data converter)" % (fs,))
+            "%s, fs = %.6f MHz (no RF data converter)" % (_FS_DESCRIPTION, fs))
+
+    def refresh_rf(self, fs=None, restart_iiod=False):
+        """Re-read the AD9361 sample rate and rebuild the frequency plan.
+
+        Needed because the two orderings conflict. QickSocE200 reads the sample
+        rate during __init__ to build the frequency plan, but programming the PL
+        re-probes the AD9361 drivers (that is what the dtbo is for) and the driver
+        re-establishes its default rate in the process. So a rate set before the
+        load does not survive it, and a rate set after the load leaves soccfg
+        describing a rate the hardware is not running -- with no error, just wrong
+        frequencies and durations.
+
+        Call this after changing sample_rate:
+
+            soc = QickSocE200(bitfile)     # PL programmed, drivers re-probed
+            sdr.sample_rate = int(56e6)    # now set the rate you want
+            soc.refresh_rf()               # and rebuild the plan around it
+
+        Pass fs to state the rate explicitly instead of reading it back.
+
+        iiod is not restarted by default here, unlike at construction, because the
+        caller is holding a libiio context that a restart would invalidate.
+        """
+        prev = self._cfg.get('refclk_freq')
+        # fs=None means re-read the hardware, which is the point of refreshing.
+        # Keeping the construction-time _fs_arg here would make refresh_rf() a
+        # no-op on exactly the sockets that were built with an explicit rate.
+        saved_fs, self._fs_arg = self._fs_arg, fs
+        saved, self._restart_iiod = self._restart_iiod, restart_iiod
+        try:
+            self.config_rf_alt()
+        except Exception:
+            self._fs_arg = saved_fs
+            raise
+        finally:
+            self._restart_iiod = saved
+        # rebuild everything downstream of the rate: the generator and readout
+        # configs carry fs, f_fabric, f_dds and the derived output rate.
+        #
+        # map_signal_paths appends to these lists rather than owning them --
+        # QickSoc.__init__ is what initialises them -- so they have to be cleared
+        # or a second call duplicates every block. That shows up as a TypeError
+        # sorting avg_bufs, because two entries then compare switch_ch, which is
+        # None on a design with no axis_switch.
+        self.gens = []
+        self.iqs = []
+        self.avg_bufs = []
+        self.readouts = []
+        self.time_taggers = []
+        self.map_signal_paths(no_tproc=(self.TPROC_VERSION == 0))
+        now = self._cfg.get('refclk_freq')
+        logger.info("refresh_rf: %s -> %s MHz", prev, now)
+        return now
 
     def clk_src(self, fullpath, port):
         """The whole QICK datapath runs on the AD9361 sample clock.
