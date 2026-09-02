@@ -14,6 +14,10 @@ another way here, because there isn't one:
 
 Three differences from an RFSoC worth keeping in mind:
 
+  * The generator drives the AD9361 transmit port directly -- there is no mux and
+    no select, so loading this overlay stops the board's own loopback demo from
+    transmitting. The AD9361 still has to have its transmit channel in DMA mode
+    for any fabric data to be forwarded; see docs/loopback.md in pluto-qick.
   * There is no digital mixer. AxisSignalGen already declares HAS_MIXER = False,
     so QICK never asks for one; frequency placement is the AD9361's analog LO,
     set through IIO independently of QICK.
@@ -51,11 +55,6 @@ DEFAULT_DTBO = '/home/xilinx/jupyter_notebooks/base/pl.dtbo'
 
 logger = logging.getLogger(__name__)
 
-# Data register offset in an AXI GPIO.
-_GPIO_DATA = 0x0
-
-# TX mux select values; must match qick_tx_mux.v in antsdr-pynq.
-TX_SRC = {'dma': 0, 'qick': 1}
 
 
 def radio_is_awake():
@@ -327,21 +326,3 @@ class QickSocE200(QickSoc):
             "Core_EN and Time_EN must both be set or the program blocks on its "
             "first timed instruction and the shot counter never advances."
             % (self.START_ATTEMPTS, self.tproc.tproc_status))
-
-    # -- board-specific control ----------------------------------------------
-
-    def tx_source(self, src):
-        """Choose what drives the AD9361 transmit port.
-
-        'dma'  the stock ADI DMA/DDS path (the reset default, so the board's
-               existing loopback behaviour survives a QICK build that produces
-               nothing)
-        'qick' the QICK signal generator
-        """
-        if src not in TX_SRC:
-            raise ValueError("tx_source must be one of %s" % (sorted(TX_SRC),))
-        self.qick_gpio.mmio.write(_GPIO_DATA, TX_SRC[src])
-
-    def get_tx_source(self):
-        val = self.qick_gpio.mmio.read(_GPIO_DATA) & 1
-        return {v: k for k, v in TX_SRC.items()}[val]
