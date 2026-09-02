@@ -7,22 +7,15 @@ from pynq.overlay import Overlay
 try:
     import xrfclk
     import xrfdc
-    _HAS_XRF = True
-except ImportError:
-    # xrfclk and xrfdc are RFSoC-only and are not packaged for Zynq-7000, so a
-    # board like the AntSDR E200 (AD9361 front end) will never have them.
-    # Everything that uses them is reached only for a design containing an RF
-    # data converter, i.e. never when running with no_rf=True.
-    xrfclk = None
-    xrfdc = None
-    _HAS_XRF = False
-
-if _HAS_XRF:
     _RFdcBase = xrfdc.RFdc
-else:
-    # Placeholder so the RFDC class below can still be defined. It is only ever
-    # instantiated by PYNQ binding it to a usp_rf_data_converter, which cannot
-    # be present if xrfdc is missing.
+except ImportError:
+    # xrfclk and xrfdc are RFSoC-only: they are not packaged for Zynq-7000, so a
+    # board whose front end is not an RF data converter (e.g. the AD9361 on an
+    # AntSDR E200) will never have them. Every use of either module sits behind
+    # a check for an RF data converter, so this import only has to keep the
+    # module importable -- which means giving RFDC a base to inherit from. PYNQ
+    # instantiates RFDC only by binding it to a usp_rf_data_converter, and one
+    # cannot be present if xrfdc is missing.
     class _RFdcBase:
         pass
 import numpy as np
@@ -969,21 +962,17 @@ class QickSoc(Overlay, QickConfig):
     def find_rf_port(self, block, kind, port):
         """Identify which converter port a generator or readout is wired to.
 
-        Returns (rf_object, port_index_as_str).
+        Returns (converter object, port index as a 2-character string).
 
-        The default follows the AXI-Stream path to the RF data converter. Boards
-        without one override this: there is no bus to trace, so the mapping has
+        The default traces the AXI-Stream path to the RF data converter. A board
+        without one overrides this: there is no bus to follow, so the mapping has
         to be stated rather than discovered.
         """
         if kind == 'dac':
             blk, prt, _ = self.metadata.trace_forward(block['fullpath'], port, ["usp_rf_data_converter"])
         else:
-            blk, prt, blocktype = self.metadata.trace_back(block['fullpath'], port, ["usp_rf_data_converter", "axis_combiner"])
-            # dual-ADC boards (ZCU111, RFSoC4x2) give two RFDC outputs per ADC,
-            # combined upstream - look at the first one
-            if blocktype == "axis_combiner":
-                ((blk, prt),) = self.metadata.trace_bus(blk, 'S00_AXIS')
-        # port names look like 's00_axis' / 'm02_axis'
+            blk, prt, _ = self.metadata.trace_back(block['fullpath'], port, ["usp_rf_data_converter"])
+        # port names are of the form 's00_axis' / 'm02_axis'
         return self._get_block(blk), prt[1:3]
 
     def map_signal_paths(self, no_tproc):

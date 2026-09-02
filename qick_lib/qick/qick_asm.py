@@ -70,15 +70,18 @@ class QickConfig():
         elif self['board']=='RFSoC4x2':
             label = {'00': 'DAC_B', '20': 'DAC_A'}[dacname]
         else:
-            # Any other board: let the converter config name the port if it
-            # can, rather than leaving label unbound and raising.
+            # Any other board: without this, label is unbound and describing the
+            # design raises UnboundLocalError. A converter config may name its
+            # own ports with a 'label' key -- carried in the config rather than
+            # resolved by a method, so it survives serialisation to a remote
+            # QickConfig -- and otherwise the port name stands in for itself.
             label = self['rf']['dacs'][dacname].get('label', dacname)
         return "DAC tile %d, blk %d is %s" % (tile, block, label)
 
     def _describe_adc(self, adcname):
         tile, block = [int(c) for c in adcname]
-        # we don't print the coupling because it might be confusing, but we could?
-        coupling = self['rf']['adcs'][adcname].get('coupling')
+        # we don't print the coupling because it might be confusing, but we could:
+        # self['rf']['adcs'][adcname]['coupling']
         if self['board']=='ZCU111':
             rfbtype = "DC" if tile > 1 else "AC"
             label = "ADC%d_T%d_CH%d, or RF board ADC %s port %d" % (tile + 224, tile, block//2, rfbtype, (tile%2)*2 + block//2)

@@ -5,9 +5,10 @@ Everything QICK normally learns from the RF data converter has to be supplied
 another way here, because there isn't one:
 
   sample rate     the AD9361's, read over IIO (or passed in explicitly)
-  converter port  stated, not discovered: sg0/m_axis goes to a TX mux and
-                  ro0/s_axis is driven from concatenated ADC buses, so there is
-                  no AXI-Stream path to trace to a converter
+  converter port  stated, not discovered: sg0/m_axis is sliced into the
+                  AD9361 transmit port and ro0/s_axis is driven from
+                  concatenated ADC buses, so there is no AXI-Stream path to
+                  trace to a converter
   datapath clock  util_ad9361_divclk/clk_out, a runtime-selectable divide of the
                   AD9361 LVDS DATA_CLK. QickMetadata.trace_clk_back deliberately
                   refuses to resolve this: it only accepts a PS or RFDC source.
@@ -189,10 +190,6 @@ _FS_DESCRIPTION = "AD9361 front end"
 
 
 class QickSocE200(QickSoc):
-    # How many times to try bringing the tProc cores up before giving up. The
-    # control handshake swallows writes unpredictably; see start_tproc().
-    START_ATTEMPTS = 12
-
     """QickSoc for the AntSDR E200 overlay in antsdr-pynq/boards/e200/qick.
 
     Parameters
@@ -204,6 +201,10 @@ class QickSocE200(QickSoc):
         is the rate at the fabric boundary, which is what the QICK datapath is
         clocked at, and is what the base design's util_ad9361_divclk produces.
     """
+
+    # How many times to try bringing the tProc cores up before giving up. The
+    # control handshake swallows writes unpredictably; see start_tproc().
+    START_ATTEMPTS = 12
 
     def __init__(self, bitfile=None, fs=None, dtbo=DEFAULT_DTBO,
                  restart_iiod=True, **kwargs):
@@ -326,9 +327,10 @@ class QickSocE200(QickSoc):
     def find_rf_port(self, block, kind, port):
         """One TX chain and one RX chain, both port '00'.
 
-        Stated rather than traced: sg0/m_axis feeds qick_tx_mux and ro0/s_axis
-        is driven from an xlconcat of the ADC buses, so neither has an
-        AXI-Stream path to a converter for trace_forward/trace_back to follow.
+        Stated rather than traced: sg0/m_axis is sliced straight into the
+        AD9361 transmit port and ro0/s_axis is driven from an xlconcat of the
+        ADC buses, so neither has an AXI-Stream path to a converter for
+        trace_forward/trace_back to follow.
         """
         return self.rf, '00'
 
