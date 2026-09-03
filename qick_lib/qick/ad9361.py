@@ -31,6 +31,7 @@ frequency grid refclk*fs_mult/fdds_div/2**32 = fs/2**32 -- exactly the step of
 the 32-bit DDS phase accumulator, so requested frequencies land where asked.
 """
 
+import atexit
 import glob
 import logging
 import os
@@ -58,6 +59,97 @@ logger = logging.getLogger(__name__)
 
 
 
+def _phy_dir():
+    """Path of the ad9361-phy IIO device, or None if it is not there."""
+    for devdir in sorted(glob.glob('/sys/bus/iio/devices/iio:device*')):
+        try:
+            if open(os.path.join(devdir, 'name')).read().strip() == 'ad9361-phy':
+                return devdir
+        except OSError:
+            continue
+    return None
+
+
+def _write_phy_attr(devdir, attr, value):
+    """Write one ad9361-phy sysfs attribute. True if it took."""
+    try:
+        with open(os.path.join(devdir, attr), 'w') as f:
+            f.write(str(value))
+        return True
+    except OSError as e:
+        logger.warning("could not write %s=%s: %s", attr, value, e)
+        return False
+
+
+# The state to leave the radio in when nothing is using it. alert, not sleep --
+# see radio_standby().
+STANDBY_MODE = 'alert'
+# Maximum attenuation the AD9361 transmitter will accept, in dB.
+TX_MAX_ATTEN = -89.75
+
+
+def radio_standby(quiet_tx=True):
+    """Put the AD9361 in its lowest safe-power state. Returns the mode left set.
+
+    alert, and deliberately not sleep. In sleep the BBPLL is off, which stops
+    the LVDS DATA_CLK that axi_ad9361/l_clk -- and through util_ad9361_divclk
+    the whole QICK datapath -- is clocked from. An AXI access with no clock
+    behind it does not fail on a Zynq, it hangs the interconnect: the CPU blocks
+    forever and stops servicing interrupts, so not even magic SysRq over the
+    serial console answers, and only a power cycle recovers the board.
+
+    alert shuts down the transmit and receive signal chains, which is where the
+    power goes, while keeping the BBPLL and the data interface running. It is
+    the state ADI's own ad9361_dig_tune runs in, so the interface clock is
+    necessarily present, and radio_is_awake() treats it as awake, so a later
+    QickSocE200 load proceeds normally from here.
+
+    Measured on an AntSDR E200: 74.6 C in fdd, settling to about 44 C in alert.
+    """
+    devdir = _phy_dir()
+    if devdir is None:
+        logger.warning("no ad9361-phy found; cannot put the radio in standby")
+        return None
+    if quiet_tx:
+        # Max attenuation, so the transmitter stays quiet even if something puts
+        # the chip back into fdd later without setting a gain first.
+        for attr in ('out_voltage0_hardwaregain', 'out_voltage1_hardwaregain'):
+            if os.path.exists(os.path.join(devdir, attr)):
+                _write_phy_attr(devdir, attr, TX_MAX_ATTEN)
+    _write_phy_attr(devdir, 'ensm_mode', STANDBY_MODE)
+    try:
+        return open(os.path.join(devdir, 'ensm_mode')).read().strip()
+    except OSError:
+        return None
+
+
+_standby_registered = False
+
+
+def _standby_at_exit():
+    """atexit hook. Must never raise: it would mask however the process is ending."""
+    try:
+        mode = radio_standby()
+        if mode is not None:
+            logger.info("radio left in %s at exit", mode)
+    except Exception:
+        logger.exception("could not put the radio in standby at exit")
+
+
+def register_standby_at_exit():
+    """Arrange for the radio to end up in standby when the process exits.
+
+    Registered once per process, however many sockets are constructed. Note that
+    atexit fires at interpreter shutdown, so in a notebook this happens when the
+    kernel stops, not when a cell finishes -- use QickSocE200 as a context
+    manager, or call soc.standby(), to hand the radio back sooner than that.
+    """
+    global _standby_registered
+    if not _standby_registered:
+        atexit.register(_standby_at_exit)
+        _standby_registered = True
+
+
 def radio_is_awake():
     """True if the AD9361 is in a state where it drives the LVDS DATA_CLK.
 
@@ -74,14 +166,13 @@ def radio_is_awake():
     calibration failed, the chip was left asleep, and the next thing to touch its
     registers took the machine down with it.
     """
-    for devdir in glob.glob('/sys/bus/iio/devices/iio:device*'):
-        try:
-            if open(os.path.join(devdir, 'name')).read().strip() != 'ad9361-phy':
-                continue
-            return open(os.path.join(devdir, 'ensm_mode')).read().strip() in ('fdd', 'tdd', 'alert')
-        except OSError:
-            return False
-    return False
+    devdir = _phy_dir()
+    if devdir is None:
+        return False
+    try:
+        return open(os.path.join(devdir, 'ensm_mode')).read().strip() in ('fdd', 'tdd', 'alert')
+    except OSError:
+        return False
 
 def read_ad9361_fs():
     """Read the AD9361 sample rate, in MHz, from IIO sysfs.
@@ -207,7 +298,7 @@ class QickSocE200(QickSoc):
     START_ATTEMPTS = 12
 
     def __init__(self, bitfile=None, fs=None, dtbo=DEFAULT_DTBO,
-                 restart_iiod=True, **kwargs):
+                 restart_iiod=True, standby_on_exit=True, **kwargs):
         self._fs_arg = fs
         if kwargs.pop('no_rf', False) is not False:
             raise ValueError("QickSocE200 always runs with no_rf=True")
@@ -219,10 +310,34 @@ class QickSocE200(QickSoc):
                 "if the PL is already programmed and you are loading with "
                 "download=False." % (dtbo,))
         self._restart_iiod = restart_iiod
+        # Leave the radio cool once nothing is using it. Registered before the
+        # PL is programmed, so it still fires if bring-up fails partway and
+        # leaves the chip in fdd.
+        if standby_on_exit:
+            register_standby_at_exit()
         # Must happen before Overlay.__init__ programs the PL.
         if kwargs.get('download', True):
             quiesce_axi_masters()
         super().__init__(bitfile=bitfile, no_rf=True, dtbo=dtbo, **kwargs)
+
+    def standby(self, quiet_tx=True):
+        """Put the radio in its lowest safe-power state; see radio_standby().
+
+        Called for you when the process exits, unless the socket was built with
+        standby_on_exit=False. Call it directly, or use the socket as a context
+        manager, to hand the radio back before then -- which is what a notebook
+        wants, since atexit does not fire until the kernel stops.
+        """
+        return radio_standby(quiet_tx=quiet_tx)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # Runs however the block ends, including on an exception, and does not
+        # suppress it.
+        self.standby()
+        return False
 
     # -- hooks that QickSoc leaves for boards without an RF data converter ----
 
